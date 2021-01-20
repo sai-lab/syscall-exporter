@@ -1,13 +1,14 @@
 #include "vmlinux.h"
 
+#include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 
 #define TASK_COMM_LEN 32
 #define TASK_RUNNING 0
 
 const volatile u32 pid_self = 0;
-const volatile u32 trace_uid = -1;
-const volatile u32 trace_pid = -1;
+const volatile bool only_trace_container = false;
 
 struct sys_enter_event_t {
   uid_t uid;
@@ -45,11 +46,27 @@ struct {
   __uint(value_size, sizeof(u32));
 } sys_exit_events SEC(".maps");
 
+static __always_inline bool is_trace_target(pid_t pid) {
+  struct task_struct *task = (void *)bpf_get_current_task();
+  u64 inum;
+  inum = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
+  if (inum == 0xEFFFFFFCU && only_trace_container)
+    return 0;
+  if (pid == pid_self) {
+    return false;
+  }
+  return true;
+}
+
 static __always_inline int
 trace_sys_enter(struct trace_event_raw_sys_enter *ctx) {
+
   struct sys_enter_event_t event = {};
   int ret;
   u32 pid = bpf_get_current_pid_tgid() >> 32;
+
+  if (!is_trace_target(pid))
+    return 0;
 
   event.uid = bpf_get_current_uid_gid();
   event.cgid = bpf_get_current_cgroup_id();
@@ -58,8 +75,6 @@ trace_sys_enter(struct trace_event_raw_sys_enter *ctx) {
   bpf_get_current_comm(&event.comm, sizeof(event.comm));
 
   bpf_map_update_elem(&sys_enter_entries, &pid, &event, 0);
-  // bpf_perf_event_output(ctx, &sys_enter_events, BPF_F_CURRENT_CPU, &event,
-  //                       sizeof(event));
   return 0;
 }
 
@@ -69,11 +84,12 @@ trace_sys_exit(struct trace_event_raw_sys_exit *ctx) {
   struct sys_enter_event_t *ap;
   u32 pid = bpf_get_current_pid_tgid() >> 32;
 
+  if (!is_trace_target(pid))
+    return 0;
+
   ap = bpf_map_lookup_elem(&sys_enter_entries, &pid);
   if (!ap)
-    return 0; /* missed entry */
-  // if (ctx->ret != 0)
-  //   goto cleanup;
+    return 0;
 
   u64 end = bpf_ktime_get_ns();
 

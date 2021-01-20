@@ -11,7 +11,6 @@
 git clone git@github.com:sai-lab/syscall-latency-exporter.git
 cd syscall-latency-exporter
 cargo libbpf make
-cargo build
 ./target/debug/syscall-latency-exporter
 ```
 
