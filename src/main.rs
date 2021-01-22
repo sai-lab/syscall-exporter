@@ -5,9 +5,8 @@ use plain::Plain;
 use structopt::StructOpt;
 
 mod bpf;
+mod syscalls;
 use bpf::*;
-
-mod syscall;
 
 #[repr(C)]
 #[derive(Default, Debug)]
@@ -26,6 +25,9 @@ unsafe impl Plain for SysExitEvent {}
 struct Command {
     #[structopt(short = "c", long = "container-only")]
     container_only: bool,
+    #[structopt(short = "s", long = "syscall")]
+    // syscall: Vec<String>,
+    syscall: Option<String>,
 }
 
 fn handle_event(_cpu: i32, data: &[u8]) {
@@ -34,18 +36,16 @@ fn handle_event(_cpu: i32, data: &[u8]) {
 
     let comm = str::from_utf8(&event.comm).unwrap().trim_end_matches('\0');
 
-    let syscall_name = if event.syscall_nr >= 350 {
-        "unknown"
-    } else {
-        syscall::SYSCALL_NAMES[event.syscall_nr as usize]
-    };
+    let syscall = syscalls::SYSCALLS
+        .get(&(*&event.syscall_nr as u32))
+        .unwrap_or(&"unknown");
 
     println!(
-        "{:8} {:8} {:8} {:32} {: <16} {:16}",
+        "{:8} {:8} {:8} {:32} {: <8.8} {:16}",
         event.pid,
         event.uid,
         event.cgid,
-        syscall_name,
+        syscall,
         event.latency as f64 / 1000_000_000.0,
         comm
     )
@@ -62,6 +62,10 @@ fn main() -> anyhow::Result<()> {
     let mut syslatency_skel = skel_builder.open()?;
     syslatency_skel.rodata().pid_self = std::process::id();
     syslatency_skel.rodata().only_trace_container = opts.container_only as u8;
+
+    if let Some(syscall) = opts.syscall {
+        syslatency_skel.rodata().trace_syscall = syscalls::to_syscall_number(&syscall)[0] as i32
+    }
 
     let mut skel = syslatency_skel.load()?;
     skel.attach()?;

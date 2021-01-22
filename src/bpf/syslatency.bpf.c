@@ -9,6 +9,7 @@
 
 const volatile u32 pid_self = 0;
 const volatile bool only_trace_container = false;
+const volatile int trace_syscall = -1;
 
 struct sys_enter_event_t {
   uid_t uid;
@@ -38,24 +39,33 @@ struct {
   __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
   __uint(key_size, sizeof(u32));
   __uint(value_size, sizeof(u32));
-} sys_enter_events SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-  __uint(key_size, sizeof(u32));
-  __uint(value_size, sizeof(u32));
 } sys_exit_events SEC(".maps");
 
-static __always_inline bool is_trace_target(pid_t pid) {
+static __always_inline bool allowed_tracing_syscall(u32 syscall_nr) {
+  if (trace_syscall < 0 || syscall_nr == trace_syscall) {
+    return true;
+  }
+  return false;
+}
+
+static __always_inline bool is_trace_target(pid_t pid, u32 syscall_nr) {
   struct task_struct *task = (void *)bpf_get_current_task();
   u64 inum;
   inum = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
+  // process is container ??
   if (inum == 0xEFFFFFFCU && only_trace_container)
-    return 0;
+    return false;
+
+  // Don't trace self
   if (pid == pid_self) {
     return false;
   }
-  return true;
+
+  if (allowed_tracing_syscall(syscall_nr)) {
+    return true;
+  }
+
+  return false;
 }
 
 static __always_inline int
@@ -65,7 +75,7 @@ trace_sys_enter(struct trace_event_raw_sys_enter *ctx) {
   int ret;
   u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-  if (!is_trace_target(pid))
+  if (!is_trace_target(pid, ctx->id))
     return 0;
 
   event.uid = bpf_get_current_uid_gid();
@@ -84,7 +94,7 @@ trace_sys_exit(struct trace_event_raw_sys_exit *ctx) {
   struct sys_enter_event_t *ap;
   u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-  if (!is_trace_target(pid))
+  if (!is_trace_target(pid, ctx->id))
     return 0;
 
   ap = bpf_map_lookup_elem(&sys_enter_entries, &pid);
